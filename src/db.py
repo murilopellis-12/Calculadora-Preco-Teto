@@ -47,6 +47,21 @@ ESQUEMA = [
         qt_tesouro_preferenciais  DOUBLE,
         qt_tesouro_total          DOUBLE
     )""",
+    """CREATE TABLE IF NOT EXISTS cotacoes (
+        ticker      VARCHAR,
+        data        DATE,
+        abertura    DOUBLE,
+        maxima      DOUBLE,
+        minima      DOUBLE,
+        fechamento  DOUBLE,
+        volume      DOUBLE
+    )""",
+    """CREATE TABLE IF NOT EXISTS proventos (
+        ticker      VARCHAR,
+        data        DATE,
+        tipo        VARCHAR,   -- 'DIVIDENDO', 'JCP', etc.
+        valor       DOUBLE     -- valor por ação já em reais
+    )""",
 ]
 
 
