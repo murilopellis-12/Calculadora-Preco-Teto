@@ -11,6 +11,8 @@ from src.indicadores import (
     formatar_tabela_exibicao,
     identificar_empresa,
     obter_historico_empresa,
+    obter_metricas_ttm,
+    obter_trimestres_dre,
 )
 
 
@@ -142,3 +144,36 @@ def test_formatar_tabela_exibicao(banco_teste):
     assert "ROE" in tabela.columns
     assert "ROIC" in tabela.columns
     assert tabela["LPA"].iloc[0] == "R$ 1.00"
+
+
+def test_obter_trimestres_dre_e_metricas_ttm(banco_teste):
+    # Inserir trimestres ITR para TEST3 (ano 2024)
+    # 1T: 30, 2T YTD: 70 (trimestre = 40), 3T YTD: 120 (trimestre = 50), 4T anual: 180 (trimestre = 60)
+    # Soma dos 4 trimestres = 30 + 40 + 50 + 60 = 180
+    linhas_itr = [
+        ("11111111000111", "100", "EMPRESA IND SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-03-31", "2024-01-01", "2024-03-31", "3.11", "Lucro Liquido", 30.0),
+        ("11111111000111", "100", "EMPRESA IND SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-06-30", "2024-01-01", "2024-06-30", "3.11", "Lucro Liquido", 70.0),
+        ("11111111000111", "100", "EMPRESA IND SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-09-30", "2024-01-01", "2024-09-30", "3.11", "Lucro Liquido", 120.0),
+        ("11111111000111", "100", "EMPRESA IND SA", "DFP", 2024, "DRE", "con", 2, "REAL",
+         "2024-12-31", "2024-01-01", "2024-12-31", "3.11", "Lucro Liquido", 180.0),
+    ]
+    banco_teste.executemany("INSERT INTO demonstracoes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", linhas_itr)
+
+    # Verifica decomposição dos trimestres
+    df_trim = obter_trimestres_dre(banco_teste, "11111111000111", cd_conta="3.11")
+    assert len(df_trim) >= 4
+    ultimos_4 = df_trim.tail(4)
+    assert list(ultimos_4["vl_trimestre"]) == [pytest.approx(30.0), pytest.approx(40.0), pytest.approx(50.0), pytest.approx(60.0)]
+
+    # Calcula métricas TTM com cotação R$ 36.00
+    m_ttm = obter_metricas_ttm(banco_teste, "TEST3", cotacao=36.0)
+    assert m_ttm.lucro_ttm == pytest.approx(180.0)
+    assert m_ttm.acoes_circulacao == pytest.approx(100.0)
+    assert m_ttm.lpa_ttm == pytest.approx(1.80)
+    assert m_ttm.pl_ttm == pytest.approx(20.0)  # 36.0 / 1.80 = 20.0x
+    assert m_ttm.janela == "1T2024 a 4T2024"
+    assert len(m_ttm.detalhes_trimestres) == 4
+

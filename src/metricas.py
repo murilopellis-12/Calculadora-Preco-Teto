@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 
 def lpa(lucro_liquido: float, total_acoes: float) -> float | None:
@@ -37,6 +37,37 @@ def roe(lucro_liquido: float, patrimonio_liquido: float) -> float | None:
     if patrimonio_liquido <= 0:
         return None
     return lucro_liquido / patrimonio_liquido
+
+
+def preco_lucro(cotacao: float, lpa: float | None) -> float | None:
+    """Preço sobre Lucro (P/L): Cotação / Lucro por Ação (LPA).
+
+    Se LPA for nulo, zero ou negativo, ou cotação <= 0, retorna None.
+    """
+    if lpa is None or lpa <= 0 or cotacao <= 0:
+        return None
+    return cotacao / lpa
+
+
+def preco_vpa(cotacao: float, vpa: float | None) -> float | None:
+    """Preço sobre Valor Patrimonial (P/VP): Cotação / VPA.
+
+    Se VPA for nulo, zero ou negativo, ou cotação <= 0, retorna None.
+    """
+    if vpa is None or vpa <= 0 or cotacao <= 0:
+        return None
+    return cotacao / vpa
+
+
+def calcular_lucro_ttm(valores_trimestrais: Sequence[float]) -> float | None:
+    """Soma o lucro líquido dos últimos 4 trimestres consecutivos (TTM).
+
+    Exige no mínimo 4 trimestres disponíveis para totalizar os 12 meses.
+    """
+    validos = [v for v in valores_trimestrais if v is not None and not (isinstance(v, float) and math.isnan(v))]
+    if len(validos) < 4:
+        return None
+    return float(sum(validos[-4:]))
 
 
 def capital_investido(
@@ -191,4 +222,34 @@ class MetricasAno:
             "ebitda": self.ebitda,
             "divida_liquida_ebitda": self.divida_liquida_ebitda,
             "payout": self.payout,
+        }
+
+
+@dataclass(frozen=True)
+class MetricasTTM:
+    """Conjunto de indicadores calculados com base nos últimos 12 meses (TTM / 4 trimestres)."""
+    lucro_ttm: float | None = None
+    acoes_circulacao: float | None = None
+    lpa_ttm: float | None = None
+    pl_ttm: float | None = None
+    vpa_recente: float | None = None
+    pvp_recente: float | None = None
+    roe_ttm: float | None = None
+    trimestres_considerados: list[str] = field(default_factory=list)
+    janela: str = ""
+    detalhes_trimestres: list[dict[str, Any]] = field(default_factory=list)
+    observacao: str = ""
+
+    def para_dicionario(self) -> dict[str, Any]:
+        return {
+            "lucro_ttm": self.lucro_ttm,
+            "acoes_circulacao": self.acoes_circulacao,
+            "lpa_ttm": self.lpa_ttm,
+            "pl_ttm": self.pl_ttm,
+            "vpa_recente": self.vpa_recente,
+            "pvp_recente": self.pvp_recente,
+            "roe_ttm": self.roe_ttm,
+            "janela": self.janela,
+            "trimestres": self.trimestres_considerados,
+            "observacao": self.observacao,
         }

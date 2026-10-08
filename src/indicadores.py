@@ -22,8 +22,10 @@ from src.contas import CONTAS, CONTAS_FINANCEIRAS
 from src.db import conectar
 from src.metricas import (
     MetricasAno,
+    MetricasTTM,
     ajustar_escala_acoes,
     cagr,
+    calcular_lucro_ttm,
     capital_investido,
     divida_liquida,
     divida_liquida_ebitda,
@@ -33,10 +35,13 @@ from src.metricas import (
     margem_ebit,
     margem_liquida,
     payout,
+    preco_lucro,
+    preco_vpa,
     roe,
     roic,
     vpa,
 )
+from src.normalize import manter_ultima_versao, ytd_para_trimestral
 
 
 def identificar_empresa(con: duckdb.DuckDBPyConnection, ticker_ou_cnpj: str) -> tuple[str, str]:
@@ -190,6 +195,137 @@ def obter_acoes_circulacao(
     qt_total = float(res[0])
     qt_tesouro = float(res[1]) if res[1] is not None else 0.0
     return ajustar_escala_acoes(qt_total, qt_tesouro, lucro_liquido=lucro_liquido)
+
+
+def obter_acoes_circulacao_recente(
+    con: duckdb.DuckDBPyConnection,
+    cnpj: str,
+    lucro_liquido: float | None = None,
+) -> float:
+    """Obtém a quantidade líquida de ações mais recente (do último ITR ou DFP reportado)."""
+    res = con.execute("""
+        SELECT qt_total, qt_tesouro_total
+        FROM composicao_capital
+        WHERE cnpj = ?
+        ORDER BY dt_refer DESC, versao DESC
+        LIMIT 1
+    """, [cnpj]).fetchone()
+    if not res or res[0] is None:
+        return 0.0
+    qt_total = float(res[0])
+    qt_tesouro = float(res[1]) if res[1] is not None else 0.0
+    return ajustar_escala_acoes(qt_total, qt_tesouro, lucro_liquido=lucro_liquido)
+
+
+def obter_patrimonio_liquido_recente(
+    con: duckdb.DuckDBPyConnection,
+    cnpj: str,
+    eh_financeira: bool = False,
+    escopo: str = "con",
+) -> float | None:
+    """Obtém o Patrimônio Líquido do balanço mais recente disponível (seja ITR ou DFP)."""
+    cd = "2.07" if eh_financeira else "2.03"
+    res = con.execute("""
+        SELECT vl_conta
+        FROM demonstracoes
+        WHERE cnpj = ?
+          AND escopo = ?
+          AND demonstracao = 'BPP'
+          AND cd_conta = ?
+        ORDER BY dt_fim_exerc DESC, versao DESC
+        LIMIT 1
+    """, [cnpj, escopo, cd]).fetchone()
+    return float(res[0]) if res and res[0] is not None else None
+
+
+def obter_trimestres_dre(
+    con: duckdb.DuckDBPyConnection,
+    cnpj: str,
+    cd_conta: str = "3.11",
+    escopo: str = "con",
+) -> pd.DataFrame:
+    """Extrai demonstrações contábeis e decompõe em trimestres individuais via ytd_para_trimestral."""
+    df = con.execute("""
+        SELECT cnpj, escopo, demonstracao, cd_conta, dt_ini_exerc, dt_fim_exerc, vl_conta, versao
+        FROM demonstracoes
+        WHERE cnpj = ?
+          AND cd_conta = ?
+          AND demonstracao = 'DRE'
+          AND escopo = ?
+        ORDER BY dt_fim_exerc, versao DESC
+    """, [cnpj, cd_conta, escopo]).df()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df = manter_ultima_versao(
+        df,
+        chaves=["cnpj", "escopo", "demonstracao", "cd_conta", "dt_ini_exerc", "dt_fim_exerc"],
+    )
+    trim = ytd_para_trimestral(df)
+    trim = trim.dropna(subset=["vl_trimestre"]).sort_values(["ano", "trimestre"]).reset_index(drop=True)
+    return trim
+
+
+def obter_metricas_ttm(
+    con: duckdb.DuckDBPyConnection,
+    ticker_ou_cnpj: str,
+    cotacao: float | None = None,
+) -> MetricasTTM:
+    """Calcula indicadores fundamentalistas no conceito TTM (últimos 12 meses / 4 trimestres)."""
+    cnpj, nome = identificar_empresa(con, ticker_ou_cnpj)
+    eh_banco = eh_instituicao_financeira(con, cnpj)
+
+    df_trim = obter_trimestres_dre(con, cnpj, cd_conta="3.11", escopo="con")
+    if df_trim.empty or len(df_trim) < 4:
+        return MetricasTTM(
+            observacao="Menos de 4 trimestres contábeis reportados para cálculo do TTM."
+        )
+
+    ultimos_4 = df_trim.tail(4).copy()
+    valores = [float(v) for v in ultimos_4["vl_trimestre"]]
+    lucro_ttm = calcular_lucro_ttm(valores)
+
+    trimestres = [f"{int(r.trimestre)}T{int(r.ano)}" for r in ultimos_4.itertuples()]
+    janela = f"{trimestres[0]} a {trimestres[-1]}"
+
+    detalhes = []
+    for r in ultimos_4.itertuples():
+        detalhes.append({
+            "trimestre_label": f"{int(r.trimestre)}T{int(r.ano)}",
+            "ano": int(r.ano),
+            "trimestre": int(r.trimestre),
+            "dt_fim_exerc": str(r.dt_fim_exerc)[:10],
+            "vl_trimestre": float(r.vl_trimestre),
+        })
+
+    acoes = obter_acoes_circulacao_recente(con, cnpj, lucro_liquido=lucro_ttm)
+    _lpa_ttm = lpa(lucro_ttm, acoes) if lucro_ttm is not None and acoes > 0 else None
+
+    pl_rec = obter_patrimonio_liquido_recente(con, cnpj, eh_financeira=eh_banco)
+    _vpa_rec = vpa(pl_rec, acoes) if pl_rec is not None and acoes > 0 else None
+
+    _pl_ttm = preco_lucro(cotacao, _lpa_ttm) if cotacao is not None else None
+    _pvp_rec = preco_vpa(cotacao, _vpa_rec) if cotacao is not None else None
+    _roe_ttm = roe(lucro_ttm, pl_rec) if lucro_ttm is not None and pl_rec is not None else None
+
+    obs = f"TTM calculado com base nos trimestres {janela}."
+    if eh_banco:
+        obs += " Instituição financeira."
+
+    return MetricasTTM(
+        lucro_ttm=lucro_ttm,
+        acoes_circulacao=acoes,
+        lpa_ttm=_lpa_ttm,
+        pl_ttm=_pl_ttm,
+        vpa_recente=_vpa_rec,
+        pvp_recente=_pvp_rec,
+        roe_ttm=_roe_ttm,
+        trimestres_considerados=trimestres,
+        janela=janela,
+        detalhes_trimestres=detalhes,
+        observacao=obs,
+    )
 
 
 def calcular_indicadores_ano(
@@ -359,6 +495,16 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nTaxas de Crescimento (CAGR):")
                 for k, v in cagrs.items():
                     print(f"  * {k.upper()}: {v*100:.2f}% a.a.")
+
+            m_ttm = obter_metricas_ttm(con, args.ticker)
+            if m_ttm.lucro_ttm is not None:
+                print(f"\nMétricas TTM (Últimos 12 Meses — Janela: {m_ttm.janela}):")
+                print(f"  * Lucro Líquido TTM: R$ {m_ttm.lucro_ttm:,.0f}")
+                if m_ttm.acoes_circulacao:
+                    print(f"  * Ações em Circulação: {m_ttm.acoes_circulacao:,.0f}")
+                print(f"  * LPA TTM: R$ {m_ttm.lpa_ttm:.2f}" if m_ttm.lpa_ttm else "  * LPA TTM: N/A")
+                print(f"  * VPA Recente: R$ {m_ttm.vpa_recente:.2f}" if m_ttm.vpa_recente else "  * VPA Recente: N/A")
+                print(f"  * ROE TTM: {m_ttm.roe_ttm*100:.1f}%" if m_ttm.roe_ttm else "  * ROE TTM: N/A")
             print()
             return 0
         except Exception as e:

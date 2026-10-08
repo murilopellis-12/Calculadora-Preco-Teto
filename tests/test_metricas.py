@@ -3,8 +3,10 @@ import pytest
 
 from src.metricas import (
     MetricasAno,
+    MetricasTTM,
     ajustar_escala_acoes,
     cagr,
+    calcular_lucro_ttm,
     capital_investido,
     divida_liquida,
     divida_liquida_ebitda,
@@ -14,6 +16,8 @@ from src.metricas import (
     margem_ebit,
     margem_liquida,
     payout,
+    preco_lucro,
+    preco_vpa,
     roe,
     roic,
     vpa,
@@ -156,3 +160,54 @@ def test_metricas_ano_dataclass():
     assert d["lpa"] == 2.5
     assert d["roe"] == 0.125
     assert d["divida_liquida_ebitda"] == 2.0
+
+
+def test_preco_lucro_e_preco_vpa():
+    # Cotação 50, LPA 2.5 -> P/L 20.0
+    assert preco_lucro(50.0, 2.5) == pytest.approx(20.0)
+    # LPA zero ou negativo -> None
+    assert preco_lucro(50.0, 0.0) is None
+    assert preco_lucro(50.0, -2.5) is None
+    # Cotação <= 0 -> None
+    assert preco_lucro(0.0, 2.5) is None
+    assert preco_lucro(-10.0, 2.5) is None
+
+    # Cotação 50, VPA 25 -> P/VP 2.0
+    assert preco_vpa(50.0, 25.0) == pytest.approx(2.0)
+    # VPA <= 0 -> None
+    assert preco_vpa(50.0, 0.0) is None
+    assert preco_vpa(50.0, -10.0) is None
+
+
+def test_calcular_lucro_ttm():
+    # 4 trimestres de 250M cada -> 1.000M
+    trimestres = [250_000.0, 250_000.0, 250_000.0, 250_000.0]
+    assert calcular_lucro_ttm(trimestres) == pytest.approx(1_000_000.0)
+
+    # 6 trimestres: deve pegar apenas os últimos 4 (100, 200, 300, 400) -> 1.000
+    historico = [50.0, 50.0, 100.0, 200.0, 300.0, 400.0]
+    assert calcular_lucro_ttm(historico) == pytest.approx(1000.0)
+
+    # Menos de 4 trimestres -> None
+    assert calcular_lucro_ttm([100.0, 200.0, 300.0]) is None
+    assert calcular_lucro_ttm([]) is None
+
+
+def test_metricas_ttm_dataclass():
+    m = MetricasTTM(
+        lucro_ttm=1_000_000.0,
+        acoes_circulacao=500_000.0,
+        lpa_ttm=2.0,
+        pl_ttm=15.0,
+        vpa_recente=10.0,
+        pvp_recente=3.0,
+        roe_ttm=0.20,
+        trimestres_considerados=["1T2024", "2T2024", "3T2024", "4T2024"],
+        janela="1T2024 a 4T2024",
+    )
+    d = m.para_dicionario()
+    assert d["lpa_ttm"] == 2.0
+    assert d["pl_ttm"] == 15.0
+    assert d["janela"] == "1T2024 a 4T2024"
+    assert len(d["trimestres"]) == 4
+
