@@ -112,13 +112,20 @@ if modo == "📌 Análise do Ativo":
     df_hist = obter_historico_empresa(con, cnpj)
     preco_atual, dt_cot = obter_cotacao_mais_recente(con, ticker_selecionado)
 
+    def ultimo_valor_valido(df: pd.DataFrame, col: str) -> float | None:
+        if df.empty or col not in df.columns:
+            return None
+        serie = df[col].dropna()
+        return float(serie.iloc[-1]) if not serie.empty else None
+
     # Linha de Métricas Chave
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-    lpa_recente = df_hist["lpa"].dropna().iloc[-1] if not df_hist.empty and "lpa" in df_hist else None
-    vpa_recente = df_hist["vpa"].dropna().iloc[-1] if not df_hist.empty and "vpa" in df_hist else None
-    roe_recente = df_hist["roe"].dropna().iloc[-1] if not df_hist.empty and "roe" in df_hist else None
-    dl_ebitda = df_hist["divida_liquida_ebitda"].dropna().iloc[-1] if not df_hist.empty and "divida_liquida_ebitda" in df_hist else None
+    lpa_recente = ultimo_valor_valido(df_hist, "lpa")
+    vpa_recente = ultimo_valor_valido(df_hist, "vpa")
+    roe_recente = ultimo_valor_valido(df_hist, "roe")
+    dl_ebitda = ultimo_valor_valido(df_hist, "divida_liquida_ebitda")
+    marg_liq_recente = ultimo_valor_valido(df_hist, "margem_liquida")
 
     provs = obter_proventos_ultimos_anos(con, ticker_selecionado, anos=5)
     dpa_medio = calcular_dividendo_medio(provs)
@@ -131,7 +138,7 @@ if modo == "📌 Análise do Ativo":
     if not eh_banco:
         col5.metric("Dív. Líq / EBITDA", f"{dl_ebitda:.2f}x" if dl_ebitda is not None else "N/A")
     else:
-        col5.metric("Margem Líquida", f"{df_hist['margem_liquida'].dropna().iloc[-1] * 100:.1f}%" if not df_hist.empty and "margem_liquida" in df_hist else "N/A")
+        col5.metric("Margem Líquida", f"{marg_liq_recente * 100:.1f}%" if marg_liq_recente is not None else "N/A")
     col6.metric("DY Médio (5a)", f"{dy_medio * 100:.1f}%" if dy_medio else "N/A")
 
     st.markdown("---")
@@ -468,20 +475,63 @@ elif modo == "🔍 Screener (Radar de Preço Teto)":
         st.dataframe(df_formatado, use_container_width=True, hide_index=True)
 
 
-# --------------------------------------------------------------------------- #
-# TELA 3: ATUALIZAÇÃO DE DADOS
-# --------------------------------------------------------------------------- #
 elif modo == "🔄 Atualização de Dados":
-    st.title("🔄 Atualização dos Dados")
-    st.write("Sincronize cotações e proventos recentes ou execute varredura:")
+    st.title("🔄 Atualização & Ingestão de Ativos")
+    st.write("Gerencie os ativos acompanhados e sincronize balanços da CVM e cotações de mercado:")
 
+    st.subheader("➕ Adicionar Novo Ticker à Carteira")
+    st.caption("Adicione um novo ativo para buscar automaticamente os balanços na CVM e as cotações de mercado.")
+    with st.form("form_add_ticker", clear_on_submit=True):
+        col_t1, col_t2 = st.columns([2, 1])
+        with col_t1:
+            novo_t = st.text_input("Código do Ticker (ex.: BBAS3, TAEE11, SAPR11):", placeholder="Ex: BBAS3")
+        with col_t2:
+            st.write("")
+            st.write("")
+            btn_add = st.form_submit_button("📥 Ingerir da CVM & Mercado", type="primary")
+
+        if btn_add:
+            t_limpo = novo_t.strip().upper()
+            if not t_limpo:
+                st.warning("Por favor, digite um código de ticker válido.")
+            else:
+                caminho_tickers = Path("tickers.txt")
+                linhas = caminho_tickers.read_text(encoding="utf-8").splitlines() if caminho_tickers.exists() else []
+                tickers_existentes = {l.strip().upper() for l in linhas if l.strip() and not l.startswith("#")}
+                if t_limpo not in tickers_existentes:
+                    with open(caminho_tickers, "a", encoding="utf-8") as f:
+                        f.write(f"\n{t_limpo}\n")
+
+                with st.spinner(f"Processando demonstrativos da CVM e cotações para {t_limpo}..."):
+                    import subprocess
+                    import sys
+                    subprocess.run(
+                        [sys.executable, "-m", "src.ingest_cvm", "--anos", "2023", "2024", "2025"],
+                        capture_output=True, text=True
+                    )
+                    atualizar_tudo(con)
+                st.success(f"Ativo **{t_limpo}** adicionado e processado com sucesso!")
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("🚀 Sincronização Geral")
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button("🚀 Atualizar Cotações & Proventos Agora", type="primary"):
+        if st.button("🔄 Atualizar Cotações & Proventos de Todos os Ativos"):
             with st.spinner("Atualizando dados de mercado..."):
                 atualizar_tudo(con)
                 st.success("Cotações e proventos atualizados com sucesso no DuckDB!")
                 st.rerun()
 
     with col_btn2:
-        st.caption("Os dados brutos e balanços são salvos em `data/acoes.duckdb`.")
+        if st.button("📑 Re-processar Balanços CVM de tickers.txt"):
+            with st.spinner("Re-processando balanços locais da CVM..."):
+                import subprocess
+                import sys
+                subprocess.run(
+                    [sys.executable, "-m", "src.ingest_cvm", "--anos", "2023", "2024", "2025"],
+                    capture_output=True, text=True
+                )
+                atualizar_tudo(con)
+                st.success("Balanços CVM reprocessados com sucesso!")
+                st.rerun()
