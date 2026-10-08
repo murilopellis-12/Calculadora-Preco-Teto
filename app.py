@@ -24,10 +24,12 @@ import streamlit as st
 
 from src.analise import avaliar_ativo
 from src.db import conectar
+from src.ingest_cvm import ingerir_cvm
 from src.indicadores import (
     eh_instituicao_financeira,
     identificar_empresa,
     obter_historico_empresa,
+    obter_metricas_ttm,
 )
 from src.market_data import (
     atualizar_tudo,
@@ -108,9 +110,10 @@ if modo == "📌 Análise do Ativo":
     tipo_badge = "🏦 Instituição Financeira" if eh_banco else "🏭 Companhia Não-Financeira"
     st.caption(f"**Segmento:** {tipo_badge} | **CNPJ:** `{cnpj}`")
 
-    # Histórico de Indicadores
+    # Histórico de Indicadores e Métricas TTM
     df_hist = obter_historico_empresa(con, cnpj)
     preco_atual, dt_cot = obter_cotacao_mais_recente(con, ticker_selecionado)
+    metricas_ttm = obter_metricas_ttm(con, cnpj, cotacao=preco_atual)
 
     def ultimo_valor_valido(df: pd.DataFrame, col: str) -> float | None:
         if df.empty or col not in df.columns:
@@ -118,28 +121,51 @@ if modo == "📌 Análise do Ativo":
         serie = df[col].dropna()
         return float(serie.iloc[-1]) if not serie.empty else None
 
-    # Linha de Métricas Chave
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-
-    lpa_recente = ultimo_valor_valido(df_hist, "lpa")
-    vpa_recente = ultimo_valor_valido(df_hist, "vpa")
-    roe_recente = ultimo_valor_valido(df_hist, "roe")
+    # Linha de Métricas Chave (TTM + Balanços)
+    lpa_anual = ultimo_valor_valido(df_hist, "lpa")
+    vpa_anual = ultimo_valor_valido(df_hist, "vpa")
+    roe_anual = ultimo_valor_valido(df_hist, "roe")
     dl_ebitda = ultimo_valor_valido(df_hist, "divida_liquida_ebitda")
     marg_liq_recente = ultimo_valor_valido(df_hist, "margem_liquida")
+
+    lpa_display = metricas_ttm.lpa_ttm or lpa_anual
+    vpa_display = metricas_ttm.vpa_recente or vpa_anual
+    roe_display = metricas_ttm.roe_ttm or roe_anual
+    pl_display = metricas_ttm.pl_ttm or (preco_atual / lpa_display if (preco_atual and lpa_display and lpa_display > 0) else None)
+    pvp_display = metricas_ttm.pvp_recente or (preco_atual / vpa_display if (preco_atual and vpa_display and vpa_display > 0) else None)
 
     provs = obter_proventos_ultimos_anos(con, ticker_selecionado, anos=5)
     dpa_medio = calcular_dividendo_medio(provs)
     dy_medio = (dpa_medio / preco_atual) if (preco_atual and dpa_medio > 0) else None
 
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
     col1.metric("Cotação Atual", f"R$ {preco_atual:.2f}" if preco_atual else "N/A", help="Último preço registrado")
-    col2.metric("P/L", f"{preco_atual / lpa_recente:.1f}x" if (preco_atual and lpa_recente and lpa_recente > 0) else "N/A")
-    col3.metric("P/VP", f"{preco_atual / vpa_recente:.2f}x" if (preco_atual and vpa_recente and vpa_recente > 0) else "N/A")
-    col4.metric("ROE Atual", f"{roe_recente * 100:.1f}%" if roe_recente else "N/A")
+
+    help_pl = "P/L TTM (Preço / Lucro dos últimos 12 meses)"
+    if metricas_ttm and metricas_ttm.janela:
+        help_pl += f" com base nos trimestres {metricas_ttm.janela}."
+    if lpa_anual and preco_atual:
+        help_pl += f" | P/L Anual Fechado (DFP): {preco_atual / lpa_anual:.1f}x."
+
+    col2.metric("P/L (TTM)", f"{pl_display:.1f}x" if pl_display else "N/A", help=help_pl)
+    col3.metric("P/VP", f"{pvp_display:.2f}x" if pvp_display else "N/A", help=f"VPA Recente: R$ {vpa_display:.2f}" if vpa_display else None)
+    col4.metric("ROE (TTM)", f"{roe_display * 100:.1f}%" if roe_display else "N/A", help=f"Rentabilidade sobre o Patrimônio nos últimos 12 meses ({metricas_ttm.janela})" if metricas_ttm.janela else None)
     if not eh_banco:
         col5.metric("Dív. Líq / EBITDA", f"{dl_ebitda:.2f}x" if dl_ebitda is not None else "N/A")
     else:
         col5.metric("Margem Líquida", f"{marg_liq_recente * 100:.1f}%" if marg_liq_recente is not None else "N/A")
     col6.metric("DY Médio (5a)", f"{dy_medio * 100:.1f}%" if dy_medio else "N/A")
+
+    if metricas_ttm and metricas_ttm.lucro_ttm:
+        st.info(
+            f"💡 **Indicadores TTM (Trailing Twelve Months — Últimos 12 Meses):** "
+            f"Calculados com a soma dos últimos 4 trimestres contábeis da CVM (**{metricas_ttm.janela}**). "
+            f"Lucro Líq. TTM: **R$ {metricas_ttm.lucro_ttm/1e9:.2f} bi** (R$ {metricas_ttm.lucro_ttm/1e6:,.0f} mi) | "
+            f"LPA TTM: **R$ {metricas_ttm.lpa_ttm:.2f}** | "
+            f"VPA Recente: **R$ {metricas_ttm.vpa_recente:.2f}** | "
+            f"P/L TTM: **{pl_display:.1f}x**."
+        )
 
     st.markdown("---")
 
@@ -166,16 +192,17 @@ if modo == "📌 Análise do Ativo":
             if payouts_validos:
                 payout_hist_medio = sum(payouts_validos) / len(payouts_validos)
 
-        lpa_proj_sugerido = (lpa_recente * 1.05) if (lpa_recente and lpa_recente > 0) else 1.0
+        lpa_base = metricas_ttm.lpa_ttm or lpa_anual or 1.0
+        lpa_proj_sugerido = (lpa_base * 1.05) if lpa_base > 0 else 1.0
 
         sim_col1, sim_col2, sim_col3 = st.columns(3)
         with sim_col1:
             fonte_lpa = st.radio(
                 "Origem da Projeção de LPA:",
-                ["Histórico CVM (+5% a.a.)", "Manual / Personalizado"],
-                help="Escolha entre a projeção automática baseada nos balanços da CVM ou insira sua própria projeção.",
+                [f"Histórico CVM TTM (+5% a.a.) [Base: R$ {lpa_base:.2f}]", "Manual / Personalizado"],
+                help="Escolha entre a projeção automática baseada nos últimos 12 meses da CVM ou insira sua própria projeção.",
             )
-            if fonte_lpa == "Manual / Personalizado":
+            if "Manual" in fonte_lpa:
                 lpa_input = st.number_input("LPA Projetado (R$/ação):", min_value=0.01, value=float(lpa_proj_sugerido), step=0.10)
             else:
                 lpa_input = float(lpa_proj_sugerido)
@@ -372,8 +399,48 @@ if modo == "📌 Análise do Ativo":
     # ABA 3: HISTÓRICO & DEMONSTRAÇÕES
     # ----------------------------------------------------------------------- #
     with tab_historico:
-        st.subheader("📈 Histórico de Resultados & Proventos (CVM)")
+        st.subheader("📈 Histórico de Resultados & Composição TTM (CVM)")
+
+        if metricas_ttm and metricas_ttm.detalhes_trimestres:
+            st.markdown(f"#### 🗓️ Composição dos 4 Últimos Trimestres (Cálculo do TTM — {metricas_ttm.janela})")
+            st.caption(
+                "Metodologia equivalente a plataformas como Investidor10 e Status Invest: "
+                "o Lucro Líquido e o LPA dos últimos 12 meses somam os 4 trimestres contábeis mais recentes entregues à CVM."
+            )
+
+            df_t = pd.DataFrame(metricas_ttm.detalhes_trimestres)
+            df_t_exibir = df_t.copy()
+            df_t_exibir["Lucro do Trimestre"] = df_t_exibir["vl_trimestre"].apply(
+                lambda v: f"R$ {v/1e9:.3f} bi" if abs(v) >= 1e9 else f"R$ {v/1e6:.1f} mi"
+            )
+            df_t_exibir = df_t_exibir[["trimestre_label", "dt_fim_exerc", "Lucro do Trimestre"]]
+            df_t_exibir.columns = ["Trimestre", "Data de Fechamento", "Lucro Líquido"]
+
+            col_t1, col_t2 = st.columns([1.2, 1.0])
+            with col_t1:
+                st.dataframe(df_t_exibir, use_container_width=True, hide_index=True)
+                st.markdown(
+                    f"**Total Lucro TTM:** R$ {metricas_ttm.lucro_ttm/1e9:.2f} bi &nbsp;|&nbsp; "
+                    f"**Ações:** {metricas_ttm.acoes_circulacao/1e9:.2f} bi &nbsp;|&nbsp; "
+                    f"**LPA TTM:** **R$ {metricas_ttm.lpa_ttm:.2f}**"
+                )
+            with col_t2:
+                fig_t = px.bar(
+                    df_t,
+                    x="trimestre_label",
+                    y="vl_trimestre",
+                    text=[f"R$ {v/1e9:.2f} bi" if abs(v)>=1e9 else f"R$ {v/1e6:.0f} mi" for v in df_t["vl_trimestre"]],
+                    labels={"trimestre_label": "Trimestre", "vl_trimestre": "Lucro (R$)"},
+                    title="Lucro por Trimestre Isolado",
+                    color_discrete_sequence=["#3B82F6"],
+                )
+                fig_t.update_layout(height=260, margin=dict(l=20, r=20, t=30, b=20))
+                st.plotly_chart(fig_t, use_container_width=True)
+
+            st.markdown("---")
+
         if not df_hist.empty:
+            st.markdown("#### 📊 Evolução Anual Consolidada (DFP)")
             col_hist1, col_hist2 = st.columns(2)
 
             with col_hist1:
@@ -407,7 +474,6 @@ if modo == "📌 Análise do Ativo":
 
             with st.expander("Ver Tabela Completa de Indicadores Anuais"):
                 st.dataframe(df_hist, use_container_width=True, hide_index=True)
-            st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,6 +507,11 @@ elif modo == "🔍 Screener (Radar de Preço Teto)":
             if filtro_desconto and (not marg_med or marg_med <= 0):
                 continue
 
+            m_ttm = rel.metricas_ttm
+            pl_ttm_val = m_ttm.pl_ttm if (m_ttm and m_ttm.pl_ttm) else (preco / rel.lpa_atual if (preco and rel.lpa_atual and rel.lpa_atual > 0) else None)
+            pvp_val = m_ttm.pvp_recente if (m_ttm and m_ttm.pvp_recente) else (preco / rel.vpa_atual if (preco and rel.vpa_atual and rel.vpa_atual > 0) else None)
+            roe_val = (m_ttm.roe_ttm if (m_ttm and m_ttm.roe_ttm) else rel.roe_atual)
+
             dados_screener.append({
                 "Ticker": t,
                 "Empresa": rel.nome_empresa,
@@ -450,9 +521,9 @@ elif modo == "🔍 Screener (Radar de Preço Teto)":
                 "Margem Médio (%)": marg_med * 100 if marg_med is not None else None,
                 "Situação": status,
                 "DY Médio (%)": dy_med * 100 if dy_med is not None else None,
-                "P/L": preco / rel.lpa_atual if (preco and rel.lpa_atual and rel.lpa_atual > 0) else None,
-                "P/VP": preco / rel.vpa_atual if (preco and rel.vpa_atual and rel.vpa_atual > 0) else None,
-                "ROE (%)": rel.roe_atual * 100 if rel.roe_atual else None,
+                "P/L (TTM)": pl_ttm_val,
+                "P/VP": pvp_val,
+                "ROE (TTM) (%)": roe_val * 100 if roe_val else None,
             })
         except Exception as e:
             continue
@@ -468,9 +539,9 @@ elif modo == "🔍 Screener (Radar de Preço Teto)":
         df_formatado["Teto Médio"] = df_formatado["Teto Médio"].apply(lambda v: f"R$ {v:.2f}" if pd.notna(v) else "-")
         df_formatado["Margem Médio (%)"] = df_formatado["Margem Médio (%)"].apply(lambda v: f"{v:+.1f}%" if pd.notna(v) else "-")
         df_formatado["DY Médio (%)"] = df_formatado["DY Médio (%)"].apply(lambda v: f"{v:.1f}%" if pd.notna(v) else "-")
-        df_formatado["P/L"] = df_formatado["P/L"].apply(lambda v: f"{v:.1f}x" if pd.notna(v) else "-")
+        df_formatado["P/L (TTM)"] = df_formatado["P/L (TTM)"].apply(lambda v: f"{v:.1f}x" if pd.notna(v) else "-")
         df_formatado["P/VP"] = df_formatado["P/VP"].apply(lambda v: f"{v:.2f}x" if pd.notna(v) else "-")
-        df_formatado["ROE (%)"] = df_formatado["ROE (%)"].apply(lambda v: f"{v:.1f}%" if pd.notna(v) else "-")
+        df_formatado["ROE (TTM) (%)"] = df_formatado["ROE (TTM) (%)"].apply(lambda v: f"{v:.1f}%" if pd.notna(v) else "-")
 
         st.dataframe(df_formatado, use_container_width=True, hide_index=True)
 
@@ -503,12 +574,7 @@ elif modo == "🔄 Atualização de Dados":
                         f.write(f"\n{t_limpo}\n")
 
                 with st.spinner(f"Processando demonstrativos da CVM e cotações para {t_limpo}..."):
-                    import subprocess
-                    import sys
-                    subprocess.run(
-                        [sys.executable, "-m", "src.ingest_cvm", "--anos", "2023", "2024", "2025"],
-                        capture_output=True, text=True
-                    )
+                    ingerir_cvm(con, anos=None)
                     atualizar_tudo(con)
                 st.success(f"Ativo **{t_limpo}** adicionado e processado com sucesso!")
                 st.rerun()
@@ -526,12 +592,7 @@ elif modo == "🔄 Atualização de Dados":
     with col_btn2:
         if st.button("📑 Re-processar Balanços CVM de tickers.txt"):
             with st.spinner("Re-processando balanços locais da CVM..."):
-                import subprocess
-                import sys
-                subprocess.run(
-                    [sys.executable, "-m", "src.ingest_cvm", "--anos", "2023", "2024", "2025"],
-                    capture_output=True, text=True
-                )
+                ingerir_cvm(con, anos=None, atualizar=True)
                 atualizar_tudo(con)
                 st.success("Balanços CVM reprocessados com sucesso!")
                 st.rerun()
