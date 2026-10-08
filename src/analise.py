@@ -30,7 +30,9 @@ from src.indicadores import (
     eh_instituicao_financeira,
     identificar_empresa,
     obter_historico_empresa,
+    obter_metricas_ttm,
 )
+from src.metricas import MetricasTTM
 from src.market_data import (
     calcular_dividendo_medio,
     obter_cotacao_mais_recente,
@@ -79,6 +81,7 @@ class RelatorioValuation:
     opcoes_lpa: OpcoesProjecaoLPA = field(default_factory=OpcoesProjecaoLPA)
     metodos: dict[str, PrecoTeto] = field(default_factory=dict)
     faixa: FaixaPrecoTeto | None = None
+    metricas_ttm: MetricasTTM | None = None
 
 
 def estimar_lpa_mercado(ticker: str) -> tuple[float | None, str]:
@@ -103,9 +106,10 @@ def calcular_opcoes_lpa(
     con: duckdb.DuckDBPyConnection,
     ticker: str,
     df_historico: pd.DataFrame,
+    lpa_ttm: float | None = None,
     lpa_manual: float | None = None,
 ) -> OpcoesProjecaoLPA:
-    """Monta as 3 opções de LPA projetado (Mercado, CVM/Histórico, Manual)."""
+    """Monta as 3 opções de LPA projetado (Mercado, CVM/Histórico/TTM, Manual)."""
     opcoes = OpcoesProjecaoLPA()
 
     # Opção 1: Mercado / Analistas
@@ -113,18 +117,19 @@ def calcular_opcoes_lpa(
     opcoes.analistas_mercado = val_mercado
     opcoes.origem_mercado = origem
 
-    # Opção 2: Histórico CVM
+    # Opção 2: Histórico CVM (prioriza LPA TTM se disponível para projetar crescimento de 5%)
+    base_lpa = lpa_ttm
     if not df_historico.empty and "lpa" in df_historico:
         lpas_validos = df_historico["lpa"].dropna().tolist()
         if lpas_validos:
             # Média dos últimos 3 anos
             ultimos_3 = lpas_validos[-3:]
             opcoes.historico_media_3a = sum(ultimos_3) / len(ultimos_3)
+            if base_lpa is None:
+                base_lpa = lpas_validos[-1]
 
-            # Último LPA com crescimento conservador de 5% se positivo
-            lpa_recente = lpas_validos[-1]
-            if lpa_recente > 0:
-                opcoes.historico_crescimento = lpa_recente * 1.05
+    if base_lpa and base_lpa > 0:
+        opcoes.historico_crescimento = base_lpa * 1.05
 
     # Opção 3: Manual do usuário
     opcoes.manual = lpa_manual
@@ -152,11 +157,18 @@ def avaliar_ativo(
         preco_atual = obter_cotacao_recente(ticker)
         dt_cot = "tempo real" if preco_atual else None
 
-    # Histórico de indicadores
+    # Histórico de indicadores e Métricas TTM
     df_hist = obter_historico_empresa(con, cnpj)
-    lpa_atual = df_hist["lpa"].dropna().iloc[-1] if not df_hist.empty and "lpa" in df_hist else None
-    vpa_atual = df_hist["vpa"].dropna().iloc[-1] if not df_hist.empty and "vpa" in df_hist else None
-    roe_atual = df_hist["roe"].dropna().iloc[-1] if not df_hist.empty and "roe" in df_hist else None
+    metricas_ttm = obter_metricas_ttm(con, cnpj, cotacao=preco_atual)
+
+    # Prioriza indicadores TTM (mais recentes) e recorre ao histórico anual DFP
+    lpa_hist = df_hist["lpa"].dropna().iloc[-1] if not df_hist.empty and "lpa" in df_hist else None
+    vpa_hist = df_hist["vpa"].dropna().iloc[-1] if not df_hist.empty and "vpa" in df_hist else None
+    roe_hist = df_hist["roe"].dropna().iloc[-1] if not df_hist.empty and "roe" in df_hist else None
+
+    lpa_atual = metricas_ttm.lpa_ttm or lpa_hist
+    vpa_atual = metricas_ttm.vpa_recente or vpa_hist
+    roe_atual = metricas_ttm.roe_ttm or roe_hist
 
     # Payout histórico médio dos últimos anos
     payout_medio = None
@@ -171,8 +183,10 @@ def avaliar_ativo(
     provs = obter_proventos_ultimos_anos(con, ticker, anos=5)
     dpa_medio = calcular_dividendo_medio(provs)
 
-    # 3 Opções de Projeção de LPA
-    opcoes_lpa = calcular_opcoes_lpa(con, ticker, df_hist, lpa_manual=lpa_projetado_manual)
+    # 3 Opções de Projeção de LPA (prioriza TTM na projeção de crescimento)
+    opcoes_lpa = calcular_opcoes_lpa(
+        con, ticker, df_hist, lpa_ttm=metricas_ttm.lpa_ttm, lpa_manual=lpa_projetado_manual
+    )
 
     # Seleciona o LPA para o método projetivo base:
     # Manual > Analistas de Mercado > Histórico Crescimento > Último LPA
@@ -267,6 +281,7 @@ def avaliar_ativo(
         opcoes_lpa=opcoes_lpa,
         metodos=metodos,
         faixa=faixa,
+        metricas_ttm=metricas_ttm,
     )
 
 
@@ -309,13 +324,18 @@ def exibir_relatorio(relatorio: RelatorioValuation) -> None:
     print(f"  Cotação Atual: {preco_str}  |  Data: {relatorio.data_cotacao or '-'}")
     print("=" * 80)
 
-    # Indicadores Base
-    lpa_str = f"R$ {relatorio.lpa_atual:.2f}" if relatorio.lpa_atual else "-"
-    vpa_str = f"R$ {relatorio.vpa_atual:.2f}" if relatorio.vpa_atual else "-"
-    roe_str = f"{relatorio.roe_atual*100:.1f}%" if relatorio.roe_atual else "-"
-    payout_str = f"{relatorio.payout_historico_medio*100:.1f}%" if relatorio.payout_historico_medio else "-"
-
-    print(f"Indicadores Base: LPA = {lpa_str} | VPA = {vpa_str} | ROE = {roe_str} | Payout Médio = {payout_str}")
+    # Indicadores Base e TTM
+    if relatorio.metricas_ttm and relatorio.metricas_ttm.lucro_ttm:
+        m = relatorio.metricas_ttm
+        pl_str = f"{m.pl_ttm:.1f}x" if m.pl_ttm else "-"
+        pvp_str = f"{m.pvp_recente:.2f}x" if m.pvp_recente else "-"
+        print(f"Indicadores TTM ({m.janela}): LPA TTM = R$ {m.lpa_ttm:.2f} | P/L TTM = {pl_str} | P/VP = {pvp_str} | ROE TTM = {m.roe_ttm*100:.1f}%")
+    else:
+        lpa_str = f"R$ {relatorio.lpa_atual:.2f}" if relatorio.lpa_atual else "-"
+        vpa_str = f"R$ {relatorio.vpa_atual:.2f}" if relatorio.vpa_atual else "-"
+        roe_str = f"{relatorio.roe_atual*100:.1f}%" if relatorio.roe_atual else "-"
+        payout_str = f"{relatorio.payout_historico_medio*100:.1f}%" if relatorio.payout_historico_medio else "-"
+        print(f"Indicadores Base: LPA = {lpa_str} | VPA = {vpa_str} | ROE = {roe_str} | Payout Médio = {payout_str}")
 
     # Opções de Projeção de LPA
     print("\nProjeções de LPA Disponíveis para o Método Projetivo:")

@@ -116,3 +116,28 @@ def test_formatar_tabela_valuation(banco_valuation):
     assert "Bazin" in tabela
     assert "Graham" in tabela
     assert "Preço Teto" in tabela
+
+
+def test_avaliar_ativo_com_ttm(banco_valuation):
+    # Inserir 4 trimestres para IND3 de forma que o TTM seja calculado
+    linhas_itr = [
+        ("11111111000111", "100", "INDUSTRIA SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-03-31", "2024-01-01", "2024-03-31", "3.11", "Lucro Líquido", 50.0),
+        ("11111111000111", "100", "INDUSTRIA SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-06-30", "2024-01-01", "2024-06-30", "3.11", "Lucro Líquido", 110.0),
+        ("11111111000111", "100", "INDUSTRIA SA", "ITR", 2024, "DRE", "con", 1, "REAL",
+         "2024-09-30", "2024-01-01", "2024-09-30", "3.11", "Lucro Líquido", 180.0),
+        ("11111111000111", "100", "INDUSTRIA SA", "DFP", 2024, "DRE", "con", 2, "REAL",
+         "2024-12-31", "2024-01-01", "2024-12-31", "3.11", "Lucro Líquido", 260.0),
+    ]
+    banco_valuation.executemany("INSERT INTO demonstracoes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", linhas_itr)
+
+    rel = avaliar_ativo(banco_valuation, "IND3")
+    assert rel.metricas_ttm is not None
+    assert rel.metricas_ttm.lucro_ttm == pytest.approx(260.0)
+    assert rel.metricas_ttm.lpa_ttm == pytest.approx(2.60)
+    assert rel.metricas_ttm.pl_ttm == pytest.approx(25.0 / 2.60)
+    assert rel.lpa_atual == pytest.approx(2.60)
+    # Projeção com crescimento deve usar 2.60 * 1.05 = 2.73
+    assert rel.opcoes_lpa.historico_crescimento == pytest.approx(2.60 * 1.05)
+
