@@ -1,0 +1,10 @@
+# Núcleo (fase 1: ingestão + cálculo)
+pandas>=2.0
+duckdb>=1.0
+requests>=2.31
+pytest>=8.0
+
+# Fase 2 (interface e cotações) - descomente quando chegar lá
+# streamlit>=1.35
+# plotly>=5.20
+# yfinance>=0.2.40

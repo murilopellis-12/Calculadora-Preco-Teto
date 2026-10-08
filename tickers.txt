@@ -1,0 +1,9 @@
+# Uma ticker por linha. Linhas com # são ignoradas.
+# Troque esta lista pelas ações que você acompanha.
+# Dica: comece com poucas (5 a 10) para validar os números antes de escalar.
+BBDC3
+CMIG4
+VALE3
+PETR4
+WEGE3
+ITSA4
