@@ -101,3 +101,31 @@ def test_gravar_e_obter_proventos_idempotente(banco_teste):
     # Ordenado do mais recente para o mais antigo: 3.0, 2.0
     assert provs == [3.0, 2.0]
     assert calcular_dividendo_medio(provs) == pytest.approx(2.5)
+
+
+def test_calcular_estatisticas_bazin():
+    import pandas as pd
+    from src.market_data import calcular_estatisticas_bazin
+
+    df = pd.DataFrame([
+        {"ano": 2023, "dpa": 1.50},
+        {"ano": 2024, "dpa": 2.50},
+    ])
+    # Média = (1.50 + 2.50) / 2 = 2.00. Yield = 6% -> Teto = 2.00 / 0.06 = 33.33. Preço = 20.00
+    est = calcular_estatisticas_bazin(df, yield_alvo=0.06, preco_atual=20.0)
+
+    assert est["anos_considerados"] == 2
+    assert est["soma_dpa"] == pytest.approx(4.00)
+    assert est["dpa_medio"] == pytest.approx(2.00)
+    assert est["preco_teto"] == pytest.approx(33.333333)
+    # Margem: 1 - 20/33.33 = +40%
+    assert est["margem_seguranca"] == pytest.approx(0.40)
+
+
+def test_obter_proventos_detalhados_bazin(banco_teste):
+    from src.market_data import obter_proventos_detalhados_bazin
+
+    # Ticker inexistente
+    df_vazio = obter_proventos_detalhados_bazin(banco_teste, "INEXISTENTE")
+    assert df_vazio.empty
+

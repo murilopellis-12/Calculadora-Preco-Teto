@@ -273,6 +273,95 @@ def obter_proventos_ultimos_anos(con: duckdb.DuckDBPyConnection, ticker: str, an
     return [float(r[0]) for r in res if r and r[0] is not None]
 
 
+def obter_proventos_detalhados_bazin(
+    con: duckdb.DuckDBPyConnection,
+    ticker: str,
+    anos: int = 5,
+) -> pd.DataFrame:
+    """Retorna tabela detalhada ano a ano dos proventos usados para o Preço Teto de Bazin.
+
+    Inclui Proventos Totais (CVM), Quantidade de Ações e DPA (R$/ação).
+    """
+    from src.indicadores import (
+        identificar_empresa,
+        obter_acoes_circulacao,
+        obter_proventos_ano,
+    )
+
+    t = ticker.strip().upper()
+    try:
+        cnpj, _ = identificar_empresa(con, t)
+    except Exception:
+        return pd.DataFrame()
+
+    anos_disponiveis = [r[0] for r in con.execute("""
+        SELECT DISTINCT year(dt_fim_exerc)
+        FROM demonstracoes
+        WHERE cnpj = ? AND fonte = 'DFP' AND escopo = 'con'
+        ORDER BY 1 DESC
+        LIMIT ?
+    """, [cnpj, anos]).fetchall()]
+
+    linhas = []
+    for ano in sorted(anos_disponiveis):
+        lucro_row = con.execute("""
+            SELECT vl_conta FROM demonstracoes
+            WHERE cnpj = ? AND fonte = 'DFP' AND escopo = 'con'
+              AND year(dt_fim_exerc) = ? AND cd_conta = '3.11'
+            ORDER BY versao DESC LIMIT 1
+        """, [cnpj, ano]).fetchone()
+        lucro = float(lucro_row[0]) if lucro_row and lucro_row[0] is not None else None
+
+        acoes = obter_acoes_circulacao(con, cnpj, ano, lucro_liquido=lucro)
+        prov_tot = obter_proventos_ano(con, cnpj, ano)
+        dpa = (prov_tot / acoes) if (acoes > 0 and prov_tot > 0) else 0.0
+
+        linhas.append({
+            "ano": int(ano),
+            "proventos_totais": prov_tot,
+            "acoes_circulacao": acoes,
+            "dpa": dpa,
+            "fonte": "CVM (DVA / DFC_MI)",
+        })
+
+    return pd.DataFrame(linhas)
+
+
+def calcular_estatisticas_bazin(
+    df_proventos: pd.DataFrame,
+    yield_alvo: float = 0.06,
+    preco_atual: float | None = None,
+) -> dict[str, Any]:
+    """Calcula estatísticas e passo a passo da fórmula de Bazin."""
+    if df_proventos.empty or "dpa" not in df_proventos:
+        return {
+            "anos_considerados": 0,
+            "soma_dpa": 0.0,
+            "dpa_medio": 0.0,
+            "yield_alvo": yield_alvo,
+            "preco_teto": 0.0,
+            "preco_atual": preco_atual,
+            "margem_seguranca": None,
+        }
+
+    dpas = df_proventos["dpa"].tolist()
+    anos_qtd = len(dpas)
+    soma = sum(dpas)
+    medio = soma / anos_qtd if anos_qtd > 0 else 0.0
+    teto = medio / yield_alvo if yield_alvo > 0 else 0.0
+    marg = (1.0 - (preco_atual / teto)) if (preco_atual and teto > 0) else None
+
+    return {
+        "anos_considerados": anos_qtd,
+        "soma_dpa": soma,
+        "dpa_medio": medio,
+        "yield_alvo": yield_alvo,
+        "preco_teto": teto,
+        "preco_atual": preco_atual,
+        "margem_seguranca": marg,
+    }
+
+
 def atualizar_tudo(con: duckdb.DuckDBPyConnection, token_brapi: str | None = None) -> None:
     """Atualiza cotações online e sincroniza proventos para todos os tickers do banco."""
     # 1. Sincroniza proventos históricos da CVM

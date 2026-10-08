@@ -32,7 +32,9 @@ from src.indicadores import (
 from src.market_data import (
     atualizar_tudo,
     calcular_dividendo_medio,
+    calcular_estatisticas_bazin,
     obter_cotacao_mais_recente,
+    obter_proventos_detalhados_bazin,
     obter_proventos_ultimos_anos,
 )
 
@@ -135,187 +137,269 @@ if modo == "📌 Análise do Ativo":
     st.markdown("---")
 
     # ----------------------------------------------------------------------- #
-    # Simulador do Método Projetivo
+    # Abas de Navegação do Ativo
     # ----------------------------------------------------------------------- #
-    st.subheader("🎯 Simulador de Preço Teto Projetivo")
-    st.markdown("Configure as expectativas de **LPA futuro**, **Payout** e **Yield mínimo desejado**:")
+    tab_teto, tab_bazin, tab_historico = st.tabs([
+        "🎯 Valuation & Preço Teto",
+        "💰 Detalhamento de Dividendos (Bazin)",
+        "📈 Histórico & Demonstrações",
+    ])
 
-    # Opções automáticas de projeção
-    payout_hist_medio = 0.50
-    if not df_hist.empty and "payout" in df_hist:
-        payouts_validos = [p for p in df_hist["payout"].dropna().tolist() if 0.0 < p <= 1.2]
-        if payouts_validos:
-            payout_hist_medio = sum(payouts_validos) / len(payouts_validos)
+    # ----------------------------------------------------------------------- #
+    # ABA 1: VALUATION & PREÇO TETO
+    # ----------------------------------------------------------------------- #
+    with tab_teto:
+        st.subheader("🎯 Simulador de Preço Teto Projetivo")
+        st.markdown("Configure as expectativas de **LPA futuro**, **Payout** e **Yield mínimo desejado**:")
 
-    lpa_proj_sugerido = (lpa_recente * 1.05) if (lpa_recente and lpa_recente > 0) else 1.0
+        # Opções automáticas de projeção
+        payout_hist_medio = 0.50
+        if not df_hist.empty and "payout" in df_hist:
+            payouts_validos = [p for p in df_hist["payout"].dropna().tolist() if 0.0 < p <= 1.2]
+            if payouts_validos:
+                payout_hist_medio = sum(payouts_validos) / len(payouts_validos)
 
-    sim_col1, sim_col2, sim_col3 = st.columns(3)
-    with sim_col1:
-        fonte_lpa = st.radio(
-            "Origem da Projeção de LPA:",
-            ["Histórico CVM (+5% a.a.)", "Manual / Personalizado"],
-            help="Escolha entre a projeção automática baseada nos balanços da CVM ou insira sua própria projeção.",
+        lpa_proj_sugerido = (lpa_recente * 1.05) if (lpa_recente and lpa_recente > 0) else 1.0
+
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        with sim_col1:
+            fonte_lpa = st.radio(
+                "Origem da Projeção de LPA:",
+                ["Histórico CVM (+5% a.a.)", "Manual / Personalizado"],
+                help="Escolha entre a projeção automática baseada nos balanços da CVM ou insira sua própria projeção.",
+            )
+            if fonte_lpa == "Manual / Personalizado":
+                lpa_input = st.number_input("LPA Projetado (R$/ação):", min_value=0.01, value=float(lpa_proj_sugerido), step=0.10)
+            else:
+                lpa_input = float(lpa_proj_sugerido)
+                st.info(f"LPA Projetado CVM: **R$ {lpa_input:.2f}**")
+
+        with sim_col2:
+            payout_input = st.slider(
+                "Payout Esperado (% do Lucro):",
+                min_value=10.0,
+                max_value=100.0,
+                value=float(round(payout_hist_medio * 100, 0)),
+                step=5.0,
+                help="Parcela do lucro distribuída em dividendos/JCP. Pré-preenchido com a média histórica.",
+            ) / 100.0
+            dividendo_esperado = lpa_input * payout_input
+            st.caption(f"Dividendo Anual Esperado: **R$ {dividendo_esperado:.2f} por ação**")
+
+        with sim_col3:
+            yield_proj_input = st.slider(
+                "Yield Mínimo Desejado (%):",
+                min_value=4.0,
+                max_value=12.0,
+                value=float(round(yield_padrao * 100, 1)),
+                step=0.5,
+            ) / 100.0
+            teto_projetivo_calculado = dividendo_esperado / yield_proj_input
+            st.success(f"Preço Teto Projetivo: **R$ {teto_projetivo_calculado:.2f}**")
+
+        st.markdown("---")
+
+        # Painel de Métodos Lado a Lado
+        st.subheader("⚖️ Métodos de Preço Teto Lado a Lado")
+
+        relatorio = avaliar_ativo(
+            con,
+            ticker_selecionado,
+            yield_minimo_projetivo=yield_proj_input,
+            yield_bazin=yield_padrao,
+            lpa_projetado_manual=lpa_input,
+            payout_projetado_manual=payout_input,
         )
-        if fonte_lpa == "Manual / Personalizado":
-            lpa_input = st.number_input("LPA Projetado (R$/ação):", min_value=0.01, value=float(lpa_proj_sugerido), step=0.10)
-        else:
-            lpa_input = float(lpa_proj_sugerido)
-            st.info(f"LPA Projetado CVM: **R$ {lpa_input:.2f}**")
 
-    with sim_col2:
-        payout_input = st.slider(
-            "Payout Esperado (% do Lucro):",
-            min_value=10.0,
-            max_value=100.0,
-            value=float(round(payout_hist_medio * 100, 0)),
-            step=5.0,
-            help="Parcela do lucro distribuída em dividendos/JCP. Pré-preenchido com a média histórica.",
-        ) / 100.0
-        dividendo_esperado = lpa_input * payout_input
-        st.caption(f"Dividendo Anual Esperado: **R$ {dividendo_esperado:.2f} por ação**")
+        tabela_metodos = []
+        nomes_plot = []
+        valores_plot = []
+        cores_plot = []
 
-    with sim_col3:
-        yield_proj_input = st.slider(
-            "Yield Mínimo Desejado (%):",
-            min_value=4.0,
-            max_value=12.0,
-            value=float(round(yield_padrao * 100, 1)),
-            step=0.5,
-        ) / 100.0
-        teto_projetivo_calculado = dividendo_esperado / yield_proj_input
-        st.success(f"Preço Teto Projetivo: **R$ {teto_projetivo_calculado:.2f}**")
+        for nome_m, pt in relatorio.metodos.items():
+            if pt.valor is not None:
+                marg = 1.0 - (preco_atual / pt.valor) if preco_atual else None
+                status = "🟢 Abaixo do Teto (Desconto)" if (marg and marg > 0) else "🔴 Acima do Teto (Ágio)"
+                tabela_metodos.append({
+                    "Método": nome_m,
+                    "Preço Teto": f"R$ {pt.valor:.2f}",
+                    "Margem de Segurança": f"{marg*100:+.1f}%" if marg is not None else "-",
+                    "Situação": status if preco_atual else "Sem cotação",
+                    "Observação": pt.observacao or "Aplicável",
+                })
+                nomes_plot.append(nome_m)
+                valores_plot.append(pt.valor)
+                cores_plot.append("#10B981" if (preco_atual and pt.valor >= preco_atual) else "#EF4444")
+            else:
+                tabela_metodos.append({
+                    "Método": nome_m,
+                    "Preço Teto": "N/A",
+                    "Margem de Segurança": "-",
+                    "Situação": "Não Aplicável",
+                    "Observação": pt.observacao,
+                })
 
-    st.markdown("---")
+        col_tab, col_chart = st.columns([1.2, 1.0])
+        with col_tab:
+            st.dataframe(pd.DataFrame(tabela_metodos), use_container_width=True, hide_index=True)
+
+        with col_chart:
+            if valores_plot and preco_atual:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=valores_plot,
+                    y=nomes_plot,
+                    orientation="h",
+                    marker_color=cores_plot,
+                    text=[f"R$ {v:.2f}" for v in valores_plot],
+                    textposition="auto",
+                    name="Preço Teto",
+                ))
+                fig.add_vline(
+                    x=preco_atual,
+                    line_width=3,
+                    line_dash="dash",
+                    line_color="#3B82F6",
+                    annotation_text=f"Cotação: R$ {preco_atual:.2f}",
+                    annotation_position="top right",
+                )
+                fig.update_layout(
+                    title=f"Comparativo vs. Cotação Atual (R$ {preco_atual:.2f})",
+                    xaxis_title="R$ por ação",
+                    yaxis_title="",
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    height=300,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        fx = relatorio.faixa
+        if fx and fx.minimo is not None:
+            st.info(
+                f"**Faixa Consolidada de Preço Teto:** "
+                f"Mínimo: **R$ {fx.minimo:.2f}** ({fx.margem_minima*100:+.1f}%)  |  "
+                f"Médio: **R$ {fx.medio:.2f}** ({fx.margem_media*100:+.1f}%)  |  "
+                f"Máximo: **R$ {fx.maximo:.2f}** ({fx.margem_maxima*100:+.1f}%)"
+            )
 
     # ----------------------------------------------------------------------- #
-    # Painel de Métodos Lado a Lado
+    # ABA 2: DETALHAMENTO DE DIVIDENDOS (BAZIN)
     # ----------------------------------------------------------------------- #
-    st.subheader("⚖️ Métodos de Preço Teto Lado a Lado")
+    with tab_bazin:
+        st.subheader(f"💰 Histórico de Proventos & Memória de Cálculo de Bazin ({ticker_selecionado})")
+        st.markdown(
+            f"""
+            O **Método de Décio Bazin** preconiza encontrar o preço teto dividindo o 
+            **dividendo médio anual por ação** pela taxa mínima de retorno esperada (**Dividend Yield alvo**, padrão 6% a.a.):
+            $$\\text{{Preço Teto (Bazin)}} = \\frac{{\\text{{Dividendo Médio Anual por Ação}}}}{{\\text{{Yield Alvo (ex: 6\\%)}}}}$$
+            Abaixo estão os valores anuais auditados extraídos dos documentos enviados à **CVM** (Demonstração do Valor Adicionado — DVA e Fluxo de Caixa — DFC):
+            """
+        )
 
-    relatorio = avaliar_ativo(
-        con,
-        ticker_selecionado,
-        yield_minimo_projetivo=yield_proj_input,
-        yield_bazin=yield_padrao,
-        lpa_projetado_manual=lpa_input,
-        payout_projetado_manual=payout_input,
-    )
+        df_bazin_detalhes = obter_proventos_detalhados_bazin(con, ticker_selecionado, anos=5)
+        estat_bazin = calcular_estatisticas_bazin(df_bazin_detalhes, yield_alvo=yield_padrao, preco_atual=preco_atual)
 
-    tabela_metodos = []
-    nomes_plot = []
-    valores_plot = []
-    cores_plot = []
+        b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+        b_col1.metric("Dividendo Médio (DPA)", f"R$ {estat_bazin['dpa_medio']:.2f}", help=f"Média aritmética dos últimos {estat_bazin['anos_considerados']} anos")
+        b_col2.metric("Yield Alvo", f"{estat_bazin['yield_alvo']*100:.1f}%", help="Taxa mínima exigida pelo investidor")
+        b_col3.metric("Preço Teto de Bazin", f"R$ {estat_bazin['preco_teto']:.2f}", help="Valor máximo sugerido para compra")
+        marg_b = estat_bazin['margem_seguranca']
+        status_b = f"{marg_b*100:+.1f}% (Desconto)" if (marg_b and marg_b > 0) else (f"{marg_b*100:+.1f}% (Ágio)" if marg_b else "-")
+        b_col4.metric("Margem de Segurança", status_b if preco_atual else "N/A", delta=f"{marg_b*100:+.1f}%" if marg_b else None)
 
-    for nome_m, pt in relatorio.metodos.items():
-        if pt.valor is not None:
-            marg = 1.0 - (preco_atual / pt.valor) if preco_atual else None
-            status = "🟢 Abaixo do Teto (Desconto)" if (marg and marg > 0) else "🔴 Acima do Teto (Ágio)"
-            tabela_metodos.append({
-                "Método": nome_m,
-                "Preço Teto": f"R$ {pt.valor:.2f}",
-                "Margem de Segurança": f"{marg*100:+.1f}%" if marg is not None else "-",
-                "Situação": status if preco_atual else "Sem cotação",
-                "Observação": pt.observacao or "Aplicável",
-            })
-            nomes_plot.append(nome_m)
-            valores_plot.append(pt.valor)
-            cores_plot.append("#10B981" if (preco_atual and pt.valor >= preco_atual) else "#EF4444")
-        else:
-            tabela_metodos.append({
-                "Método": nome_m,
-                "Preço Teto": "N/A",
-                "Margem de Segurança": "-",
-                "Situação": "Não Aplicável",
-                "Observação": pt.observacao,
-            })
+        if estat_bazin['anos_considerados'] > 0:
+            passo_soma = " + ".join([f"R$ {v:.2f}" for v in df_bazin_detalhes['dpa']])
+            st.info(
+                f"**Memória de Cálculo Detalhada:**\n"
+                f"1. **Soma dos Dividendos Anuais:** ({passo_soma}) = **R$ {estat_bazin['soma_dpa']:.2f}**\n"
+                f"2. **Dividendo Médio por Ação:** R$ {estat_bazin['soma_dpa']:.2f} ÷ {estat_bazin['anos_considerados']} anos = **R$ {estat_bazin['dpa_medio']:.2f}**\n"
+                f"3. **Preço Teto:** R$ {estat_bazin['dpa_medio']:.2f} ÷ {estat_bazin['yield_alvo']:.2f} = **R$ {estat_bazin['preco_teto']:.2f}**"
+            )
 
-    col_tab, col_chart = st.columns([1.2, 1.0])
-    with col_tab:
-        st.dataframe(pd.DataFrame(tabela_metodos), use_container_width=True, hide_index=True)
+        if not df_bazin_detalhes.empty:
+            df_exibir_bazin = df_bazin_detalhes.copy()
+            df_exibir_bazin["Total Distribuído"] = df_exibir_bazin["proventos_totais"].apply(
+                lambda v: f"R$ {v/1e9:.2f} bi" if v >= 1e9 else f"R$ {v/1e6:.1f} mi"
+            )
+            df_exibir_bazin["Ações em Circulação"] = df_exibir_bazin["acoes_circulacao"].apply(
+                lambda v: f"{v/1e9:.2f} bilhões" if v >= 1e9 else f"{v/1e6:.1f} milhões"
+            )
+            df_exibir_bazin["Dividendo por Ação (DPA)"] = df_exibir_bazin["dpa"].apply(lambda v: f"R$ {v:.2f}")
+            df_exibir_bazin["Yield s/ Cotação Atual"] = df_exibir_bazin["dpa"].apply(
+                lambda v: f"{(v/preco_atual)*100:.1f}%" if (preco_atual and preco_atual > 0) else "-"
+            )
+            df_exibir_bazin = df_exibir_bazin[["ano", "Total Distribuído", "Ações em Circulação", "Dividendo por Ação (DPA)", "Yield s/ Cotação Atual", "fonte"]]
+            df_exibir_bazin.columns = ["Ano", "Total Distribuído (Companhia)", "Ações em Circulação (CVM)", "DPA (R$/ação)", "Yield s/ Preço Atual", "Origem dos Dados"]
 
-    with col_chart:
-        if valores_plot and preco_atual:
-            fig = go.Figure()
-            # Barras dos tetos
-            fig.add_trace(go.Bar(
-                x=valores_plot,
-                y=nomes_plot,
-                orientation="h",
-                marker_color=cores_plot,
-                text=[f"R$ {v:.2f}" for v in valores_plot],
+            st.markdown("#### 📄 Tabela de Dividendos Auditados Utilizados no Cálculo")
+            st.dataframe(df_exibir_bazin, use_container_width=True, hide_index=True)
+
+            fig_bazin = go.Figure()
+            fig_bazin.add_trace(go.Bar(
+                x=df_bazin_detalhes["ano"],
+                y=df_bazin_detalhes["dpa"],
+                name="DPA Pago no Ano",
+                text=[f"R$ {v:.2f}" for v in df_bazin_detalhes["dpa"]],
                 textposition="auto",
-                name="Preço Teto",
+                marker_color="#10B981",
             ))
-            # Linha vertical da cotação atual
-            fig.add_vline(
-                x=preco_atual,
+            fig_bazin.add_hline(
+                y=estat_bazin["dpa_medio"],
                 line_width=3,
                 line_dash="dash",
-                line_color="#3B82F6",
-                annotation_text=f"Cotação: R$ {preco_atual:.2f}",
-                annotation_position="top right",
+                line_color="#F59E0B",
+                annotation_text=f"Média Bazin: R$ {estat_bazin['dpa_medio']:.2f}",
+                annotation_position="top left",
             )
-            fig.update_layout(
-                title=f"Comparativo vs. Cotação Atual (R$ {preco_atual:.2f})",
-                xaxis_title="R$ por ação",
-                yaxis_title="",
+            fig_bazin.update_layout(
+                title=f"Histórico de Dividendos por Ação (DPA) vs. Média de Bazin ({ticker_selecionado})",
+                xaxis_title="Ano",
+                yaxis_title="R$ por ação",
+                height=340,
                 margin=dict(l=20, r=20, t=40, b=20),
-                height=300,
             )
-            st.plotly_chart(fig, use_container_width=True)
-
-    # Faixa consolidada
-    fx = relatorio.faixa
-    if fx and fx.minimo is not None:
-        st.info(
-            f"**Faixa Consolidada de Preço Teto:** "
-            f"Mínimo: **R$ {fx.minimo:.2f}** ({fx.margem_minima*100:+.1f}%)  |  "
-            f"Médio: **R$ {fx.medio:.2f}** ({fx.margem_media*100:+.1f}%)  |  "
-            f"Máximo: **R$ {fx.maximo:.2f}** ({fx.margem_maxima*100:+.1f}%)"
-        )
-
-    st.markdown("---")
+            st.plotly_chart(fig_bazin, use_container_width=True)
+        else:
+            st.warning("Sem histórico de proventos encontrado para este ticker.")
 
     # ----------------------------------------------------------------------- #
-    # Histórico de Indicadores e Dividendos (Plotly)
+    # ABA 3: HISTÓRICO & DEMONSTRAÇÕES
     # ----------------------------------------------------------------------- #
-    st.subheader("📈 Histórico de Resultados & Proventos (CVM)")
-    if not df_hist.empty:
-        col_hist1, col_hist2 = st.columns(2)
+    with tab_historico:
+        st.subheader("📈 Histórico de Resultados & Proventos (CVM)")
+        if not df_hist.empty:
+            col_hist1, col_hist2 = st.columns(2)
 
-        with col_hist1:
-            # Gráfico de LPA e VPA
-            fig_lucro = go.Figure()
-            if "lpa" in df_hist:
-                fig_lucro.add_trace(go.Bar(x=df_hist["ano"], y=df_hist["lpa"], name="LPA (R$)", marker_color="#3B82F6"))
-            if "vpa" in df_hist:
-                fig_lucro.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["vpa"], name="VPA (R$)", line=dict(color="#10B981", width=3)))
-            fig_lucro.update_layout(
-                title="Evolução de LPA e VPA por Ação",
-                xaxis_title="Ano",
-                yaxis_title="R$/ação",
-                barmode="group",
-                height=320,
-            )
-            st.plotly_chart(fig_lucro, use_container_width=True)
+            with col_hist1:
+                fig_lucro = go.Figure()
+                if "lpa" in df_hist:
+                    fig_lucro.add_trace(go.Bar(x=df_hist["ano"], y=df_hist["lpa"], name="LPA (R$)", marker_color="#3B82F6"))
+                if "vpa" in df_hist:
+                    fig_lucro.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["vpa"], name="VPA (R$)", line=dict(color="#10B981", width=3)))
+                fig_lucro.update_layout(
+                    title="Evolução de LPA e VPA por Ação",
+                    xaxis_title="Ano",
+                    yaxis_title="R$/ação",
+                    barmode="group",
+                    height=320,
+                )
+                st.plotly_chart(fig_lucro, use_container_width=True)
 
-        with col_hist2:
-            # Gráfico de Rentabilidade (ROE / ROIC)
-            fig_rent = go.Figure()
-            if "roe" in df_hist:
-                fig_rent.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["roe"] * 100, name="ROE (%)", mode="lines+markers", line=dict(color="#F59E0B", width=3)))
-            if "roic" in df_hist and not eh_banco:
-                fig_rent.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["roic"] * 100, name="ROIC (%)", mode="lines+markers", line=dict(color="#8B5CF6", width=3)))
-            fig_rent.update_layout(
-                title="Evolução de Rentabilidade (% a.a.)",
-                xaxis_title="Ano",
-                yaxis_title="%",
-                height=320,
-            )
-            st.plotly_chart(fig_rent, use_container_width=True)
+            with col_hist2:
+                fig_rent = go.Figure()
+                if "roe" in df_hist:
+                    fig_rent.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["roe"] * 100, name="ROE (%)", mode="lines+markers", line=dict(color="#F59E0B", width=3)))
+                if "roic" in df_hist and not eh_banco:
+                    fig_rent.add_trace(go.Scatter(x=df_hist["ano"], y=df_hist["roic"] * 100, name="ROIC (%)", mode="lines+markers", line=dict(color="#8B5CF6", width=3)))
+                fig_rent.update_layout(
+                    title="Evolução de Rentabilidade (% a.a.)",
+                    xaxis_title="Ano",
+                    yaxis_title="%",
+                    height=320,
+                )
+                st.plotly_chart(fig_rent, use_container_width=True)
 
-        # Tabela histórica completa
-        with st.expander("Ver Tabela Completa de Indicadores Anuais"):
+            with st.expander("Ver Tabela Completa de Indicadores Anuais"):
+                st.dataframe(df_hist, use_container_width=True, hide_index=True)
             st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
 
