@@ -304,6 +304,67 @@ def mostrar_resumo(con) -> None:
     print(df.to_string(index=False) if not df.empty else "Banco vazio. Rode a ingestão primeiro.")
 
 
+def ingerir_cvm(
+    con: duckdb.DuckDBPyConnection,
+    anos: list[int] | None = None,
+    fontes: list[str] | None = None,
+    escopos: list[str] | None = None,
+    caminho_tickers: Path | str = "tickers.txt",
+    raw_dir: Path | str = "data/raw/cvm",
+    mapa_manual: Path | str | None = None,
+    atualizar: bool = False,
+    todas: bool = False,
+) -> int:
+    """Executa a rotina completa de ingestão de dados da CVM para a conexão DuckDB fornecida."""
+    ano_atual = date.today().year
+    anos = sorted(anos or list(range(ano_atual - 5, ano_atual + 1)))
+    fontes = fontes or ["DFP", "ITR"]
+    escopos = escopos or ["con"]
+    raw = Path(raw_dir)
+
+    mapa = montar_mapa_tickers(
+        raw, max(anos), atualizar, Path(mapa_manual) if mapa_manual else None
+    )
+
+    cnpjs: set[str] | None = None
+    if not todas:
+        pedidos = ler_tickers(Path(caminho_tickers))
+        if not pedidos:
+            log.error("%s está vazio. Adicione tickers ou use todas=True.", caminho_tickers)
+            return 1
+        achados = mapa[mapa["ticker"].isin(pedidos)]
+        faltando = sorted(set(pedidos) - set(achados["ticker"]))
+        if faltando:
+            log.warning("Tickers sem CNPJ no FCA (ignorados; use mapa_manual): %s", faltando)
+        cnpjs = set(achados["cnpj"])
+        if not cnpjs:
+            log.error("Nenhum ticker pôde ser mapeado para CNPJ.")
+            return 1
+        log.info("Empresas selecionadas: %d", len(cnpjs))
+
+    todas_demos = []
+    for fonte in fontes:
+        for ano in anos:
+            # O zip do ano corrente muda ao longo do ano, então sempre rebaixamos.
+            zp = baixar(
+                URLS[fonte].format(ano=ano),
+                raw / fonte / f"{fonte.lower()}_cia_aberta_{ano}.zip",
+                atualizar or ano == ano_atual,
+            )
+            if not zp:
+                log.warning("%s %d indisponível, pulando.", fonte, ano)
+                continue
+            demos = processar_demonstracoes(zp, fonte, ano, cnpjs, set(escopos))
+            n1 = gravar_demonstracoes(con, demos)
+            n2 = gravar_capital(con, processar_capital(zp, fonte, ano, cnpjs))
+            log.info("%s %d: %d linhas de demonstrações, %d de composição do capital", fonte, ano, n1, n2)
+            todas_demos.append(demos)
+
+    if todas_demos:
+        gravar_empresas_e_tickers(con, pd.concat(todas_demos, ignore_index=True), mapa)
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -329,44 +390,20 @@ def main(argv: list[str] | None = None) -> int:
         mostrar_resumo(con)
         return 0
 
-    raw = Path(args.raw)
-    mapa = montar_mapa_tickers(raw, max(args.anos), args.atualizar, Path(args.mapa_manual) if args.mapa_manual else None)
-
-    cnpjs: set[str] | None = None
-    if not args.todas:
-        pedidos = ler_tickers(Path(args.tickers))
-        if not pedidos:
-            log.error("%s está vazio. Adicione tickers ou use --todas.", args.tickers)
-            return 1
-        achados = mapa[mapa["ticker"].isin(pedidos)]
-        faltando = sorted(set(pedidos) - set(achados["ticker"]))
-        if faltando:
-            log.warning("Tickers sem CNPJ no FCA (ignorados; use --mapa-manual): %s", faltando)
-        cnpjs = set(achados["cnpj"])
-        if not cnpjs:
-            log.error("Nenhum ticker pôde ser mapeado para CNPJ.")
-            return 1
-        log.info("Empresas selecionadas: %d", len(cnpjs))
-
-    todas_demos = []
-    for fonte in args.fontes:
-        for ano in sorted(args.anos):
-            # O zip do ano corrente muda ao longo do ano, então sempre rebaixamos.
-            zp = baixar(URLS[fonte].format(ano=ano), raw / fonte / f"{fonte.lower()}_cia_aberta_{ano}.zip",
-                        args.atualizar or ano == ano_atual)
-            if not zp:
-                log.warning("%s %d indisponível, pulando.", fonte, ano)
-                continue
-            demos = processar_demonstracoes(zp, fonte, ano, cnpjs, set(args.escopos))
-            n1 = gravar_demonstracoes(con, demos)
-            n2 = gravar_capital(con, processar_capital(zp, fonte, ano, cnpjs))
-            log.info("%s %d: %d linhas de demonstrações, %d de composição do capital", fonte, ano, n1, n2)
-            todas_demos.append(demos)
-
-    if todas_demos:
-        gravar_empresas_e_tickers(con, pd.concat(todas_demos, ignore_index=True), mapa)
-    log.info("Pronto. Veja o resultado com: python -m src.ingest_cvm --resumo")
-    return 0
+    status = ingerir_cvm(
+        con=con,
+        anos=args.anos,
+        fontes=args.fontes,
+        escopos=args.escopos,
+        caminho_tickers=args.tickers,
+        raw_dir=args.raw,
+        mapa_manual=args.mapa_manual,
+        atualizar=args.atualizar,
+        todas=args.todas,
+    )
+    if status == 0:
+        log.info("Pronto. Veja o resultado com: python -m src.ingest_cvm --resumo")
+    return status
 
 
 if __name__ == "__main__":
